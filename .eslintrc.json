@@ -1,0 +1,53 @@
+{
+  "env": {
+    "es2022": true,
+    "node": true,
+    "browser": true
+  },
+  "extends": [
+    "eslint:recommended"
+  ],
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "module"
+  },
+  "globals": {
+    "Response": "readonly",
+    "Request": "readonly",
+    "URL": "readonly",
+    "Headers": "readonly",
+    "fetch": "readonly",
+    "addEventListener": "readonly",
+    "caches": "readonly",
+    "crypto": "readonly",
+    "btoa": "readonly",
+    "atob": "readonly"
+  },
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-console": "off",
+    "prefer-const": "error",
+    "no-var": "error",
+    "eqeqeq": "error",
+    "no-trailing-spaces": "error",
+    "indent": ["error", 2],
+    "quotes": ["error", "single", { "allowTemplateLiterals": true }],
+    "semi": ["error", "always"]
+  },
+  "overrides": [
+    {
+      "files": ["scripts/*.js"],
+      "env": {
+        "node": true,
+        "browser": false
+      },
+      "globals": {
+        "console": "readonly",
+        "process": "readonly",
+        "require": "readonly",
+        "module": "readonly",
+        "__dirname": "readonly"
+      }
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+name = "ai-image-generator"
+main = "src/index.js"
+compatibility_date = "2024-06-03"
+minify = true
+
+# AI Workers binding
+[ai]
+binding = "AI"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+APP_NAME = "AI Image Generator"
+MAX_PROMPT_LENGTH = "2048"
+MAX_STEPS = "8"
+DEFAULT_STEPS = "4"
+
+# Development environment overrides
+[env.development]
+name = "ai-image-generator-dev"
+vars = { ENVIRONMENT = "development" }
+
+# Staging environment
+[env.staging]
+name = "ai-image-generator-staging"
+vars = { ENVIRONMENT = "staging" }
+
+# KV namespace for storing images and history
+[[kv_namespaces]]
+binding = "IMAGE_STORE"
+id = "8d454992bcad405e804df5af8de66da5"
+preview_id = "41ae3a8f56424ee0ac0f945b9239423e"
+
+# Analytics Engine binding (optional)
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+
+# Build configuration - since we're using inline HTML, no build needed
+# [build]
+# command = ""
+# cwd = "."
+
+# Memory and CPU limits
+limits = { cpu_ms = 50 }
+
+# Custom domains (uncomment and configure as needed)
+# routes = [
+#   { pattern = "ai-generator.yourdomain.com", custom_domain = true }
+# ]
+
+# Node.js compatibility
+compatibility_flags = ["nodejs_compat"]
