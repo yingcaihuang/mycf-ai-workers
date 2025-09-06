@@ -11,6 +11,8 @@
 - 🚀 **极速体验**: 基于 Cloudflare Workers 的全球 CDN 加速
 - 💾 **智能存储**: 使用 KV 存储保存用户历史记录
 
+![AI图像生成器网站截图](https://raw.githubusercontent.com/yingcaihuang/mycf-ai-workers/refs/heads/main/screencapture-ai-image-generator-nfr-gcr-eastasia-workers-dev-2025-09-06-19_11_21.png)
+
 ## 🛠️ 技术栈
 
 - **后端**: Cloudflare Workers
