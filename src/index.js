@@ -189,9 +189,13 @@ export default {
     if (request.method === 'GET' && url.pathname.startsWith('/api/image/')) {
       try {
         const imageKey = url.pathname.replace('/api/image/', '');
+        console.log('Fetching image with key:', imageKey);
+        
         const imageObject = await env.IMAGES_BUCKET.get(imageKey);
+        console.log('Image object found:', !!imageObject);
         
         if (!imageObject) {
+          console.log('Image not found in R2 bucket');
           return new Response('Image not found', { status: 404, headers: corsHeaders });
         }
 
@@ -203,6 +207,7 @@ export default {
           }
         });
       } catch (error) {
+        console.error('Error fetching image:', error);
         return new Response('Failed to fetch image', {
           status: 500,
           headers: corsHeaders
@@ -218,32 +223,11 @@ export default {
           list.keys.slice(0, 20).map(async (key) => {
             const data = await env.IMAGE_STORE.get(key.name);
             const item = JSON.parse(data);
-            
-            // 为每个历史记录项添加第一张图片的数据
-            if (item.r2Keys && item.r2Keys.length > 0) {
-              try {
-                const imageObject = await env.IMAGES_BUCKET.get(item.r2Keys[0]);
-                if (imageObject) {
-                  const arrayBuffer = await imageObject.arrayBuffer();
-                  const uint8Array = new Uint8Array(arrayBuffer);
-                  const base64 = btoa(String.fromCharCode.apply(null, uint8Array));
-                  item.imageData = base64;
-                }
-              } catch (error) {
-                console.error('Failed to load image from R2:', error);
-                // 如果无法从 R2 加载图像，跳过这个历史项
-                return null;
-              }
-            }
-            
             return item;
           })
         );
 
-        // 过滤掉 null 值（无法加载图像的项）
-        const validHistory = history.filter(item => item !== null);
-
-        return new Response(JSON.stringify(validHistory.sort((a, b) => b.timestamp - a.timestamp)), {
+        return new Response(JSON.stringify(history.sort((a, b) => b.timestamp - a.timestamp)), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       } catch (error) {
@@ -954,13 +938,14 @@ async function getHTML() {
                 
                 if (Array.isArray(history) && history.length > 0) {
                     historyGrid.innerHTML = history.map(item => {
-                        const imageUrl = item.imageData ? 
-                            \`data:image/png;base64,\${item.imageData}\` : 
-                            \`/api/image/\${item.r2Keys[0]}\`;
+                        // 使用R2图像API端点
+                        const imageUrl = item.r2Keys && item.r2Keys.length > 0 ? 
+                            \`/api/image/\${item.r2Keys[0]}\` : 
+                            'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjBmMGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIEltYWdlPC90ZXh0Pjwvc3ZnPg==';
                         
                         return \`
                         <div class="history-item" onclick="openHistoryModal('\${item.timestamp}', '\${escapeHtml(item.prompt)}', \${item.steps}, \${item.numImages || 1})">
-                            <img src="\${imageUrl}" alt="Generated image">
+                            <img src="\${imageUrl}" alt="Generated image" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjBmMGYwIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPkVycm9yPC90ZXh0Pjwvc3ZnPg=='">
                             <div class="history-item-info">
                                 <div class="history-item-prompt">\${escapeHtml(item.prompt)}</div>
                                 <div class="history-item-meta">步数: \${item.steps} | \${item.numImages || 1}张图片 | \${new Date(item.timestamp).toLocaleDateString('zh-CN')}</div>
