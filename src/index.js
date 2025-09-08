@@ -31,7 +31,7 @@ export default {
     // API endpoint for image generation
     if (request.method === 'POST' && url.pathname === '/api/generate') {
       try {
-        const { prompt, steps = 4 } = await request.json();
+        const { prompt, steps = 4, numImages = 1 } = await request.json();
 
         // Validate input
         if (!prompt || prompt.length < 1 || prompt.length > 2048) {
@@ -54,28 +54,123 @@ export default {
           );
         }
 
-        // Call Cloudflare Workers AI
-        const response = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
-          prompt: prompt,
-          steps: parseInt(steps)
-        });
+        if (numImages < 1 || numImages > 4) {
+          return new Response(
+            JSON.stringify({ error: 'Number of images must be between 1 and 4' }),
+            {
+              status: 400,
+              headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            }
+          );
+        }
 
-        // Store in KV for history (optional)
+        // Generate multiple images
+        const images = [];
+        const r2Keys = [];
         const timestamp = Date.now();
+
+        for (let i = 0; i < numImages; i++) {
+          try {
+            // Call Cloudflare Workers AI for each image
+            const response = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', {
+              prompt: prompt,
+              steps: parseInt(steps)
+            });
+
+            console.log('AI Response type:', typeof response);
+            console.log('AI Response keys:', Object.keys(response || {}));
+            console.log('Image type:', typeof response?.image);
+
+            if (!response || !response.image) {
+              throw new Error('No image data received from AI model');
+            }
+
+            let imageBuffer;
+            let imageBase64;
+
+            // Handle different response formats - FLUX.1 typically returns base64 string
+            if (typeof response.image === 'string') {
+              // If it's already base64 encoded (most common case for FLUX.1)
+              imageBase64 = response.image;
+              // Convert base64 to buffer for R2 storage
+              const binaryString = atob(response.image);
+              imageBuffer = new Uint8Array(binaryString.length);
+              for (let j = 0; j < binaryString.length; j++) {
+                imageBuffer[j] = binaryString.charCodeAt(j);
+              }
+            } else if (response.image instanceof ArrayBuffer) {
+              imageBuffer = new Uint8Array(response.image);
+              imageBase64 = btoa(String.fromCharCode(...imageBuffer));
+            } else if (response.image && typeof response.image.arrayBuffer === 'function') {
+              // If it's a readable stream or blob
+              const buffer = await response.image.arrayBuffer();
+              imageBuffer = new Uint8Array(buffer);
+              imageBase64 = btoa(String.fromCharCode(...imageBuffer));
+            } else {
+              console.error('Unsupported image format:', typeof response.image, response.image);
+              throw new Error('Unsupported image format from AI model');
+            }
+
+            // Store image in R2
+            const imageKey = `images/${timestamp}-${i + 1}.png`;
+            
+            await env.IMAGES_BUCKET.put(imageKey, imageBuffer, {
+              httpMetadata: {
+                contentType: 'image/png',
+                cacheControl: 'public, max-age=31536000', // 1 year cache
+              },
+              customMetadata: {
+                prompt: prompt,
+                steps: steps.toString(),
+                timestamp: timestamp.toString(),
+                imageIndex: (i + 1).toString(),
+                totalImages: numImages.toString()
+              }
+            });
+            
+            images.push({
+              base64: `data:image/png;base64,${imageBase64}`,
+              r2Key: imageKey,
+              index: i + 1
+            });
+            
+            r2Keys.push(imageKey);
+          } catch (error) {
+            console.error(`Failed to generate image ${i + 1}:`, error);
+            // Continue with other images even if one fails
+          }
+        }
+
+        if (images.length === 0) {
+          return new Response(
+            JSON.stringify({ error: 'Failed to generate any images' }),
+            {
+              status: 500,
+              headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            }
+          );
+        }
+
+        // Store metadata in KV for history
         const historyKey = `history:${timestamp}`;
         await env.IMAGE_STORE.put(historyKey, JSON.stringify({
           prompt,
           steps,
+          numImages,
           timestamp,
-          imageData: response.image
-        }), { expirationTtl: 86400 * 7 }); // 7 days
+          r2Keys,
+          generatedCount: images.length
+        }), { expirationTtl: 86400 * 30 }); // 30 days
 
         return new Response(JSON.stringify({
           success: true,
-          image: response.image,
+          images,
           timestamp,
           prompt,
-          steps
+          steps,
+          numImages,
+          generatedCount: images.length,
+          r2Keys
         }), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
@@ -114,6 +209,34 @@ export default {
             headers: { 'Content-Type': 'application/json', ...corsHeaders }
           }
         );
+      }
+    }
+
+    // API endpoint for serving images from R2
+    if (request.method === 'GET' && url.pathname.startsWith('/api/image/')) {
+      try {
+        const imageKey = url.pathname.replace('/api/image/', '');
+        const object = await env.IMAGES_BUCKET.get(imageKey);
+        
+        if (!object) {
+          return new Response('Image not found', {
+            status: 404,
+            headers: corsHeaders
+          });
+        }
+
+        return new Response(object.body, {
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=31536000',
+            ...corsHeaders
+          }
+        });
+      } catch (error) {
+        return new Response('Failed to fetch image', {
+          status: 500,
+          headers: corsHeaders
+        });
       }
     }
 
@@ -302,6 +425,62 @@ async function getHTML() {
             border-radius: 12px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
             margin-bottom: 15px;
+        }
+
+        .images-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .image-item {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+        }
+
+        .image-item:hover {
+            transform: scale(1.05);
+        }
+
+        .image-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .image-index {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .download-btn {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            background: rgba(102, 126, 234, 0.9);
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .image-item:hover .download-btn {
+            opacity: 1;
         }
 
         .result-placeholder {
@@ -522,6 +701,22 @@ async function getHTML() {
                         <small style="color: #718096;">更多步数 = 更高质量，但生成时间更长</small>
                     </div>
 
+                    <div class="form-group">
+                        <label for="numImages">生成图片数量</label>
+                        <div class="steps-group">
+                            <input 
+                                type="range" 
+                                id="numImages" 
+                                class="steps-input" 
+                                min="1" 
+                                max="4" 
+                                value="1"
+                            >
+                            <div id="numImages-display" class="steps-display">1 张</div>
+                        </div>
+                        <small style="color: #718096;">一次生成多张图片，每张都将保存到云存储</small>
+                    </div>
+
                     <button type="submit" id="generate-btn" class="generate-btn">
                         <span class="loading-spinner" id="loading-spinner"></span>
                         <span id="btn-text">🚀 生成图像</span>
@@ -565,6 +760,8 @@ async function getHTML() {
         const charCounter = document.getElementById('char-counter');
         const stepsInput = document.getElementById('steps');
         const stepsDisplay = document.getElementById('steps-display');
+        const numImagesInput = document.getElementById('numImages');
+        const numImagesDisplay = document.getElementById('numImages-display');
         const generateForm = document.getElementById('generate-form');
         const generateBtn = document.getElementById('generate-btn');
         const loadingSpinner = document.getElementById('loading-spinner');
@@ -584,6 +781,7 @@ async function getHTML() {
             loadHistory();
             updateCharCounter();
             updateStepsDisplay();
+            updateNumImagesDisplay();
         });
 
         // Character counter
@@ -603,6 +801,14 @@ async function getHTML() {
             stepsDisplay.textContent = \`\${value} 步\`;
         }
 
+        // Number of images slider
+        numImagesInput.addEventListener('input', updateNumImagesDisplay);
+
+        function updateNumImagesDisplay() {
+            const value = numImagesInput.value;
+            numImagesDisplay.textContent = \`\${value} 张\`;
+        }
+
         // Form submission
         generateForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -612,6 +818,7 @@ async function getHTML() {
         async function generateImage() {
             const prompt = promptInput.value.trim();
             const steps = parseInt(stepsInput.value);
+            const numImages = parseInt(numImagesInput.value);
 
             if (!prompt) {
                 showError('请输入图像描述');
@@ -632,14 +839,14 @@ async function getHTML() {
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ prompt, steps })
+                    body: JSON.stringify({ prompt, steps, numImages })
                 });
 
                 const data = await response.json();
 
                 if (data.success) {
-                    displayResult(data);
-                    showSuccess('图像生成成功！');
+                    displayResults(data);
+                    showSuccess(\`成功生成了 \${data.generatedCount} 张图像并保存到云存储！\`);
                     loadHistory(); // Refresh history
                 } else {
                     showError(data.error || '生成失败');
@@ -658,17 +865,41 @@ async function getHTML() {
             btnText.textContent = isGenerating ? '生成中...' : '🚀 生成图像';
         }
 
-        function displayResult(data) {
-            const imageUrl = \`data:image/png;base64,\${data.image}\`;
-            
-            resultContainer.innerHTML = \`
-                <img src="\${imageUrl}" alt="Generated image" class="result-image" onclick="openModal('\${imageUrl}', '\${escapeHtml(data.prompt)}', \${data.steps}, \${data.timestamp})">
-                <div class="result-info">
-                    <div><strong>提示词:</strong> \${escapeHtml(data.prompt)}</div>
-                    <div><strong>步数:</strong> \${data.steps}</div>
-                    <div><strong>生成时间:</strong> \${new Date(data.timestamp).toLocaleString('zh-CN')}</div>
-                </div>
-            \`;
+        function displayResults(data) {
+            if (data.images && data.images.length > 0) {
+                const imagesHtml = data.images.map((image, index) => \`
+                    <div class="image-item" onclick="openModal('\${image.base64}', '\${escapeHtml(data.prompt)}', \${data.steps}, \${data.timestamp}, \${index + 1})">
+                        <img src="\${image.base64}" alt="Generated image \${index + 1}">
+                        <div class="image-index">\${index + 1}/\${data.images.length}</div>
+                        <button class="download-btn" onclick="event.stopPropagation(); downloadImage('\${image.base64}', 'generated-image-\${data.timestamp}-\${index + 1}.png')">📥</button>
+                    </div>
+                \`).join('');
+
+                resultContainer.innerHTML = \`
+                    <div class="images-grid">
+                        \${imagesHtml}
+                    </div>
+                    <div class="result-info">
+                        <div><strong>提示词:</strong> \${escapeHtml(data.prompt)}</div>
+                        <div><strong>步数:</strong> \${data.steps}</div>
+                        <div><strong>生成数量:</strong> \${data.generatedCount} / \${data.numImages} 张</div>
+                        <div><strong>生成时间:</strong> \${new Date(data.timestamp).toLocaleString('zh-CN')}</div>
+                        <div><strong>云存储:</strong> 已保存到 R2 存储桶</div>
+                    </div>
+                \`;
+            } else {
+                showError('未能生成任何图像');
+            }
+        }
+
+        // Download function
+        function downloadImage(base64Data, filename) {
+            const link = document.createElement('a');
+            link.href = base64Data;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
         }
 
         async function loadHistory() {
@@ -695,16 +926,18 @@ async function getHTML() {
             }
         }
 
-        function openModal(imageUrl, prompt, steps, timestamp) {
+        function openModal(imageUrl, prompt, steps, timestamp, imageIndex = null) {
             modalImage.src = imageUrl;
             modalInfo.innerHTML = \`
                 <div style="margin-top: 15px;">
                     <div><strong>提示词:</strong> \${escapeHtml(prompt)}</div>
                     <div><strong>步数:</strong> \${steps}</div>
+                    \${imageIndex ? \`<div><strong>图片:</strong> 第 \${imageIndex} 张</div>\` : ''}
                     <div><strong>生成时间:</strong> \${new Date(timestamp).toLocaleString('zh-CN')}</div>
                 </div>
             \`;
-            downloadBtn.onclick = () => downloadImage(imageUrl, \`ai-image-\${timestamp}.png\`);
+            const filename = imageIndex ? \`ai-image-\${timestamp}-\${imageIndex}.png\` : \`ai-image-\${timestamp}.png\`;
+            downloadBtn.onclick = () => downloadImage(imageUrl, filename);
             imageModal.style.display = 'block';
         }
 

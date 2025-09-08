@@ -14,6 +14,8 @@ APP_NAME = "AI Image Generator"
 MAX_PROMPT_LENGTH = "2048"
 MAX_STEPS = "8"
 DEFAULT_STEPS = "4"
+MAX_IMAGES = "4"
+DEFAULT_IMAGES = "1"
 
 # Development environment overrides
 [env.development]
@@ -30,6 +32,11 @@ vars = { ENVIRONMENT = "staging" }
 binding = "IMAGE_STORE"
 id = "8d454992bcad405e804df5af8de66da5"
 preview_id = "41ae3a8f56424ee0ac0f945b9239423e"
+
+# R2 bucket for storing generated images
+[[r2_buckets]]
+binding = "IMAGES_BUCKET"
+bucket_name = "ai-generated-images"
 
 # Analytics Engine binding (optional)
 [[analytics_engine_datasets]]
