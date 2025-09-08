@@ -185,6 +185,31 @@ export default {
       }
     }
 
+    // API endpoint for individual image access
+    if (request.method === 'GET' && url.pathname.startsWith('/api/image/')) {
+      try {
+        const imageKey = url.pathname.replace('/api/image/', '');
+        const imageObject = await env.IMAGES_BUCKET.get(imageKey);
+        
+        if (!imageObject) {
+          return new Response('Image not found', { status: 404, headers: corsHeaders });
+        }
+
+        return new Response(imageObject.body, {
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=31536000',
+            ...corsHeaders
+          }
+        });
+      } catch (error) {
+        return new Response('Failed to fetch image', {
+          status: 500,
+          headers: corsHeaders
+        });
+      }
+    }
+
     // API endpoint for history
     if (request.method === 'GET' && url.pathname === '/api/history') {
       try {
@@ -192,11 +217,33 @@ export default {
         const history = await Promise.all(
           list.keys.slice(0, 20).map(async (key) => {
             const data = await env.IMAGE_STORE.get(key.name);
-            return JSON.parse(data);
+            const item = JSON.parse(data);
+            
+            // 为每个历史记录项添加第一张图片的数据
+            if (item.r2Keys && item.r2Keys.length > 0) {
+              try {
+                const imageObject = await env.IMAGES_BUCKET.get(item.r2Keys[0]);
+                if (imageObject) {
+                  const arrayBuffer = await imageObject.arrayBuffer();
+                  const uint8Array = new Uint8Array(arrayBuffer);
+                  const base64 = btoa(String.fromCharCode.apply(null, uint8Array));
+                  item.imageData = base64;
+                }
+              } catch (error) {
+                console.error('Failed to load image from R2:', error);
+                // 如果无法从 R2 加载图像，跳过这个历史项
+                return null;
+              }
+            }
+            
+            return item;
           })
         );
 
-        return new Response(JSON.stringify(history.sort((a, b) => b.timestamp - a.timestamp)), {
+        // 过滤掉 null 值（无法加载图像的项）
+        const validHistory = history.filter(item => item !== null);
+
+        return new Response(JSON.stringify(validHistory.sort((a, b) => b.timestamp - a.timestamp)), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders }
         });
       } catch (error) {
@@ -906,15 +953,21 @@ async function getHTML() {
                 const history = await response.json();
                 
                 if (Array.isArray(history) && history.length > 0) {
-                    historyGrid.innerHTML = history.map(item => \`
-                        <div class="history-item" onclick="openModal('data:image/png;base64,\${item.imageData}', '\${escapeHtml(item.prompt)}', \${item.steps}, \${item.timestamp})">
-                            <img src="data:image/png;base64,\${item.imageData}" alt="Generated image">
+                    historyGrid.innerHTML = history.map(item => {
+                        const imageUrl = item.imageData ? 
+                            \`data:image/png;base64,\${item.imageData}\` : 
+                            \`/api/image/\${item.r2Keys[0]}\`;
+                        
+                        return \`
+                        <div class="history-item" onclick="openHistoryModal('\${item.timestamp}', '\${escapeHtml(item.prompt)}', \${item.steps}, \${item.numImages || 1})">
+                            <img src="\${imageUrl}" alt="Generated image">
                             <div class="history-item-info">
                                 <div class="history-item-prompt">\${escapeHtml(item.prompt)}</div>
-                                <div class="history-item-meta">步数: \${item.steps} | \${new Date(item.timestamp).toLocaleDateString('zh-CN')}</div>
+                                <div class="history-item-meta">步数: \${item.steps} | \${item.numImages || 1}张图片 | \${new Date(item.timestamp).toLocaleDateString('zh-CN')}</div>
                             </div>
                         </div>
-                    \`).join('');
+                        \`;
+                    }).join('');
                 } else {
                     historyGrid.innerHTML = '<p style="text-align: center; color: #a0aec0; grid-column: 1 / -1;">暂无生成历史</p>';
                 }
@@ -937,6 +990,81 @@ async function getHTML() {
             const filename = imageIndex ? \`ai-image-\${timestamp}-\${imageIndex}.png\` : \`ai-image-\${timestamp}.png\`;
             downloadBtn.onclick = () => downloadImage(imageUrl, filename);
             imageModal.style.display = 'block';
+        }
+
+        async function openHistoryModal(timestamp, prompt, steps, numImages) {
+            try {
+                // 获取历史记录详情
+                const response = await fetch('/api/history');
+                const history = await response.json();
+                const item = history.find(h => h.timestamp.toString() === timestamp);
+                
+                if (!item) {
+                    showError('无法找到历史记录');
+                    return;
+                }
+
+                if (numImages === 1) {
+                    // 单图显示
+                    const imageUrl = item.imageData ? 
+                        \`data:image/png;base64,\${item.imageData}\` : 
+                        \`/api/image/\${item.r2Keys[0]}\`;
+                    openModal(imageUrl, prompt, steps, timestamp);
+                } else {
+                    // 多图显示 - 在新页面或模态框中显示所有图片
+                    showHistoryImagesGrid(item, prompt, steps, timestamp);
+                }
+            } catch (error) {
+                console.error('Error opening history modal:', error);
+                showError('加载历史详情失败');
+            }
+        }
+
+        function showHistoryImagesGrid(item, prompt, steps, timestamp) {
+            const imagesHtml = item.r2Keys.map((key, index) => \`
+                <div class="image-container">
+                    <img src="/api/image/\${key}" alt="Generated image \${index + 1}">
+                    <button class="download-btn" onclick="downloadImageFromUrl('/api/image/\${key}', 'ai-image-\${timestamp}-\${index + 1}.png')">
+                        下载图片 \${index + 1}
+                    </button>
+                </div>
+            \`).join('');
+
+            resultContainer.innerHTML = \`
+                <div class="images-grid">
+                    \${imagesHtml}
+                </div>
+                <div class="result-info">
+                    <div><strong>提示词:</strong> \${escapeHtml(prompt)}</div>
+                    <div><strong>步数:</strong> \${steps}</div>
+                    <div><strong>生成数量:</strong> \${item.r2Keys.length} 张</div>
+                    <div><strong>生成时间:</strong> \${new Date(timestamp).toLocaleString('zh-CN')}</div>
+                    <div><strong>云存储:</strong> 已保存到 R2 存储桶</div>
+                </div>
+            \`;
+            
+            // 滚动到结果区域
+            resultContainer.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        async function downloadImageFromUrl(imageUrl, filename) {
+            try {
+                const response = await fetch(imageUrl);
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                URL.revokeObjectURL(url);
+            } catch (error) {
+                console.error('Download failed:', error);
+                showError('下载失败');
+            }
         }
 
         function downloadImage(imageUrl, filename) {
