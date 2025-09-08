@@ -77,9 +77,7 @@ export default {
               steps: parseInt(steps)
             });
 
-            console.log('AI Response type:', typeof response);
-            console.log('AI Response keys:', Object.keys(response || {}));
-            console.log('Image type:', typeof response?.image);
+            // 处理图像数据格式
 
             if (!response || !response.image) {
               throw new Error('No image data received from AI model');
